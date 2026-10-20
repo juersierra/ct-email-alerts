@@ -1,0 +1,23 @@
+{
+  "domains": [
+    "notificaciones.centralticket.net",
+    "marketing.centralticket.net"
+  ],
+  "alert_from": "",
+  "alert_to": [
+    "juersierra@gmail.com",
+    "developers@centralticket.net"
+  ],
+  "mailgun_api_base": "https://api.mailgun.net",
+  "thresholds": {
+    "gmail_spam_warning": 0.001,
+    "gmail_spam_critical": 0.003,
+    "spike_factor": 2.0,
+    "spike_min_ratio": 0.0005,
+    "mailgun_complaint_rate": 0.0008,
+    "mailgun_min_delivered": 100,
+    "postmaster_stale_days": 4,
+    "bad_reputations": ["LOW", "BAD"]
+  },
+  "lookback_days": 10
+}
