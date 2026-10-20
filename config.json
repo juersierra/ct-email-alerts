@@ -17,8 +17,10 @@
     "spike_min_ratio": 0.0005,
     "mailgun_complaint_rate": 0.0008,
     "mailgun_min_delivered": 100,
-    "postmaster_stale_days": 4,
-    "bad_reputations": ["LOW", "BAD"]
+    "postmaster_stale_days": 4
   },
-  "lookback_days": 10
+  "lookback_days": 10,
+  "warning_to": [
+    "juersierra@gmail.com"
+  ]
 }

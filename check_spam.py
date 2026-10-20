@@ -3,8 +3,9 @@
 Chequeo diario de spam para los dominios de envío de Central Ticket.
 
 Fuentes:
-  - Google Postmaster Tools API v1: spam rate reportado por usuarios de Gmail y
-    reputación del dominio (los datos llegan con 1-2 días de demora).
+  - Google Postmaster Tools API v2: spam rate reportado por usuarios de Gmail y
+    tasa de errores de entrega (los datos llegan con 1-2 días de demora).
+    Scope OAuth requerido: postmaster.traffic.readonly.
   - Mailgun: tasa de quejas (complained / delivered) por dominio. No incluye a
     Gmail, que no informa quejas individuales a los proveedores de envío.
 
@@ -32,7 +33,7 @@ import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-POSTMASTER = "https://gmailpostmastertools.googleapis.com/v1"
+POSTMASTER = "https://gmailpostmastertools.googleapis.com/v2"
 
 
 def load_config():
@@ -82,46 +83,60 @@ def google_access_token():
     return body["access_token"], None
 
 
-def postmaster_domains(token):
-    status, body = http("GET", f"{POSTMASTER}/domains?pageSize=100",
-                        {"Authorization": f"Bearer {token}"})
-    if status != 200:
-        return None, f"Postmaster /domains HTTP {status}: {body.get('_error', '')}"
-    return [d["name"].split("/", 1)[1] for d in body.get("domains", [])], None
+def _date(d):
+    return {"year": d.year, "month": d.month, "day": d.day}
 
 
-def pick_postmaster_domain(domain, registered):
-    """Usa el subdominio si está registrado; si no, el dominio padre más cercano."""
-    parts = domain.split(".")
-    for i in range(len(parts) - 1):
-        cand = ".".join(parts[i:])
-        if cand in registered:
-            return cand
-    return None
-
-
-def postmaster_stats(token, pm_domain, days):
+def postmaster_query(token, pm_domain, days):
+    """Postmaster Tools API v2: spam rate y tasa de errores de entrega por día."""
     end = dt.date.today()
     start = end - dt.timedelta(days=days)
-    q = {
-        "pageSize": 100,
-        "startDate.year": start.year, "startDate.month": start.month, "startDate.day": start.day,
-        "endDate.year": end.year, "endDate.month": end.month, "endDate.day": end.day,
+    body = {
+        "aggregationGranularity": "DAILY",
+        "metricDefinitions": [
+            {"name": "spam_rate", "baseMetric": {"standardMetric": "SPAM_RATE"}},
+            {"name": "delivery_error_rate", "baseMetric": {"standardMetric": "DELIVERY_ERROR_RATE"}},
+        ],
+        "timeQuery": {"dateRanges": {"dateRanges": [{"start": _date(start), "end": _date(end)}]}},
+        "pageSize": 200,
     }
-    url = f"{POSTMASTER}/domains/{pm_domain}/trafficStats?{urllib.parse.urlencode(q)}"
-    status, body = http("GET", url, {"Authorization": f"Bearer {token}"})
+    status, resp = http("POST", f"{POSTMASTER}/domains/{pm_domain}/domainStats:query",
+                        {"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                        json.dumps(body).encode())
     if status != 200:
-        return None, f"Postmaster trafficStats HTTP {status}: {body.get('_error', '')}"
+        return None, status, resp.get("_error", "")
+    by_day = {}
+    for s in resp.get("domainStats", []):
+        d = s.get("date") or {}
+        if not d.get("year"):
+            continue
+        key = f"{d['year']:04d}-{d['month']:02d}-{d['day']:02d}"
+        v = s.get("value") or {}
+        num = v.get("doubleValue", v.get("floatValue"))
+        if num is None and v.get("intValue") is not None:
+            num = float(v["intValue"])
+        by_day.setdefault(key, {"date": key, "spam_ratio": None, "delivery_error_rate": None})[s.get("metric")] = num
     rows = []
-    for s in body.get("trafficStats", []):
-        day = s["name"].rsplit("/", 1)[-1]  # YYYYMMDD
-        rows.append({
-            "date": f"{day[:4]}-{day[4:6]}-{day[6:]}",
-            "spam_ratio": s.get("userReportedSpamRatio"),
-            "reputation": s.get("domainReputation"),
-        })
-    rows.sort(key=lambda r: r["date"])
-    return rows, None
+    for key in sorted(by_day):
+        r = by_day[key]
+        r["spam_ratio"] = r.pop("spam_rate", None)
+        rows.append(r)
+    return rows, 200, ""
+
+
+def postmaster_stats(token, domain, days):
+    """Prueba el subdominio y, si no está registrado o no hay permiso, los dominios padre."""
+    parts = domain.split(".")
+    errors = []
+    for i in range(len(parts) - 1):
+        cand = ".".join(parts[i:])
+        rows, status, err = postmaster_query(token, cand, days)
+        if status == 200:
+            return cand, rows, None
+        errors.append(f"{cand}: HTTP {status} {err[:200]}")
+        if status not in (403, 404):
+            break
+    return None, None, "Postmaster v2 sin acceso: " + " | ".join(errors)
 
 
 # ------------------------------------------------------------------- Mailgun
@@ -172,9 +187,6 @@ def evaluate(domain, pm_rows, mg_rows, th, pm_domain):
                 alerts.append(("ALERTA", f"Spam rate Gmail {pct(last['spam_ratio'])} el {last['date']} (por encima de {pct(th['gmail_spam_warning'])})"))
             if avg is not None and last["spam_ratio"] >= th["spike_min_ratio"] and last["spam_ratio"] > avg * th["spike_factor"]:
                 alerts.append(("ALERTA", f"Suba brusca: {pct(last['spam_ratio'])} el {last['date']} vs. promedio previo {pct(avg)}"))
-        last_rep = next((r for r in reversed(pm_rows) if r["reputation"]), None)
-        if last_rep and last_rep["reputation"] in th["bad_reputations"]:
-            alerts.append(("ALERTA", f"Reputación Postmaster {last_rep['reputation']} el {last_rep['date']}"))
         last_date = dt.date.fromisoformat(pm_rows[-1]["date"])
         if (dt.date.today() - last_date).days > th["postmaster_stale_days"]:
             alerts.append(("AVISO", f"Postmaster sin datos desde {pm_rows[-1]['date']} (volumen a Gmail bajo o problema de la fuente)"))
@@ -205,7 +217,7 @@ def build_email(results, test):
     for d in results:
         lines.append(f"\n{d['domain']} (Postmaster: {d['postmaster_domain'] or 'no registrado'})")
         for r in (d["postmaster"] or [])[-5:]:
-            lines.append(f"  Gmail {r['date']}: spam {pct(r['spam_ratio'])}, reputación {r['reputation'] or 'sin dato'}")
+            lines.append(f"  Gmail {r['date']}: spam {pct(r['spam_ratio'])}, errores de entrega {pct(r['delivery_error_rate'])}")
         for r in (d["mailgun"] or [])[-5:]:
             lines.append(f"  Mailgun {r['date']}: {r['delivered']} entregados, {r['complained']} quejas")
         for e in d["errors"]:
@@ -225,27 +237,15 @@ def main():
     out = {"date": dt.date.today().isoformat(), "global_errors": [], "domains": [], "email": None}
 
     token, err = google_access_token()
-    registered = []
     if err:
         out["global_errors"].append(err)
-    else:
-        registered, err = postmaster_domains(token)
-        if err:
-            out["global_errors"].append(err)
-            registered = []
-    out["postmaster_registered"] = registered
 
     for domain in cfg["domains"]:
         d = {"domain": domain, "postmaster_domain": None, "postmaster": None, "mailgun": None, "errors": []}
-        if token and registered is not None:
-            pm = pick_postmaster_domain(domain, registered)
-            d["postmaster_domain"] = pm
-            if pm:
-                d["postmaster"], e = postmaster_stats(token, pm, cfg["lookback_days"])
-                if e:
-                    d["errors"].append(e)
-            elif registered:
-                d["errors"].append("dominio no registrado en Postmaster")
+        if token:
+            d["postmaster_domain"], d["postmaster"], e = postmaster_stats(token, domain, cfg["lookback_days"])
+            if e:
+                d["errors"].append(e)
         d["mailgun"], e = mailgun_stats(cfg["mailgun_api_base"], domain, cfg["lookback_days"])
         if e:
             d["errors"].append(e)
@@ -275,8 +275,10 @@ def main():
                         if any(level in ("CRÍTICA", "ALERTA") for level, _ in d["alerts"])}
             if sender_domain in troubled and cfg.get("alert_from_fallback"):
                 sender = cfg["alert_from_fallback"]
-            ok, detail = mailgun_send(cfg["mailgun_api_base"], sender, cfg["alert_to"], subject, text)
-            out["email"] = {"sent": ok, "detail": detail, "subject": subject, "from": sender, "to": cfg["alert_to"]}
+            # Las alertas reales van al equipo; los avisos (fuentes caídas, falta de datos) solo al dueño.
+            to = cfg["alert_to"] if (has_alerts or args.test_alert) else cfg.get("warning_to", cfg["alert_to"])
+            ok, detail = mailgun_send(cfg["mailgun_api_base"], sender, to, subject, text)
+            out["email"] = {"sent": ok, "detail": detail, "subject": subject, "from": sender, "to": to}
     else:
         out["email"] = {"sent": False, "detail": "dry-run" if args.dry_run else "sin alertas"}
 
