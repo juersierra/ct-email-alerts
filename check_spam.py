@@ -175,6 +175,10 @@ def pct(x):
 
 def evaluate(domain, pm_rows, mg_rows, th, pm_domain):
     alerts = []
+    if pm_rows is not None and not [r for r in pm_rows if r["spam_ratio"] is not None]:
+        # Sin datos de Gmail: típico de dominios nuevos o con poco volumen a Gmail.
+        # Queda en el resumen pero no dispara email.
+        alerts.append(("INFO", f"Postmaster no tiene spam rate de Gmail para {pm_domain or domain} en los últimos días: este dominio queda sin monitoreo de Gmail hasta que haya volumen suficiente"))
     if pm_rows:
         valid = [r for r in pm_rows if r["spam_ratio"] is not None]
         if valid:
@@ -202,7 +206,7 @@ def build_email(results, test):
     lines = []
     worst = "AVISO"
     for d in results:
-        if not d["alerts"]:
+        if not [x for x in d["alerts"] if x[0] != "INFO"] and not test:
             continue
         lines.append(f"== {d['domain']} ==")
         for level, msg in d["alerts"]:
@@ -259,7 +263,7 @@ def main():
             d["alerts"].append(("AVISO", e))
 
     has_alerts = any(level in ("CRÍTICA", "ALERTA") for d in out["domains"] for level, _ in d["alerts"])
-    has_warnings = any(d["alerts"] for d in out["domains"])
+    has_warnings = any(level == "AVISO" for d in out["domains"] for level, _ in d["alerts"])
     should_send = has_alerts or has_warnings or args.test_alert
 
     if should_send and not args.dry_run:
