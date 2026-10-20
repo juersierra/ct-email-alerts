@@ -3,7 +3,8 @@
     "notificaciones.centralticket.net",
     "marketing.centralticket.net"
   ],
-  "alert_from": "",
+  "alert_from": "Alertas Central Ticket <alertas@marketing.centralticket.net>",
+  "alert_from_fallback": "Alertas Central Ticket <alertas@notificaciones.centralticket.net>",
   "alert_to": [
     "juersierra@gmail.com",
     "developers@centralticket.net"

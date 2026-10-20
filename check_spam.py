@@ -267,8 +267,16 @@ def main():
             out["email"] = {"sent": False, "detail": "falta alert_from en config.json"}
         else:
             subject, text = build_email(out["domains"], args.test_alert)
-            ok, detail = mailgun_send(cfg["mailgun_api_base"], cfg["alert_from"], cfg["alert_to"], subject, text)
-            out["email"] = {"sent": ok, "detail": detail, "subject": subject, "to": cfg["alert_to"]}
+            sender = cfg["alert_from"]
+            # Si el dominio remitente es justo el que tiene problemas, la alerta podría caer en spam:
+            # en ese caso se envía desde el remitente alternativo.
+            sender_domain = sender.split("@", 1)[1].strip(">").strip()
+            troubled = {d["domain"] for d in out["domains"]
+                        if any(level in ("CRÍTICA", "ALERTA") for level, _ in d["alerts"])}
+            if sender_domain in troubled and cfg.get("alert_from_fallback"):
+                sender = cfg["alert_from_fallback"]
+            ok, detail = mailgun_send(cfg["mailgun_api_base"], sender, cfg["alert_to"], subject, text)
+            out["email"] = {"sent": ok, "detail": detail, "subject": subject, "from": sender, "to": cfg["alert_to"]}
     else:
         out["email"] = {"sent": False, "detail": "dry-run" if args.dry_run else "sin alertas"}
 
